@@ -1,0 +1,118 @@
+
+Query 1 : Problem Statement 1
+
+------------------------------------------------------------------------------------------------------------------------------------
+Step 1: The FLUME job which will place the data to HDFS (flume_states.conf file is attached)
+------------------------------------------------------------------------------------------------------------------------------------- 
+1) flume-ng agent --conf-file /etc/flume-ng/conf/flume_states.conf --name agent1  --classpath /my-folder/cdh-twitter-example-master/flume-sources/target/flume-sources-1.0-SNAPSHOT.jar
+-------------------------------------------------------------------------------------------------------------------------------------
+
+Step 2 : Pig Commands to parse and load the XML data
+-------------------------------------------------------------------------------------------------------------------------------------
+2) REGISTER /usr/lib/pig/piggybank.jar;
+
+3) DEFINE XPATH org.apache.pig.piggybank.evaluation.xml.XPath();
+
+4) states_data = load '/user/flume/flume_import/StatewiseDistrictwisePhysicalProgress.xml' using org.apache.pig.piggybank.storage.XMLLoader('row') as (x:chararray);
+
+5) states_data_format = foreach states_data generate XPATH(x,'row/State_Name') as State_Name,XPATH(x,'row/District_Name') as District_Name,XPATH(x,'row/Project_Objectives_IHHL_BPL') as Project_Objectives_IHHL_BPL,XPATH(x,'row/Project_Objectives_IHHL_APL') as Project_Objectives_IHHL_APL,XPATH(x,'row/Project_Objectives_IHHL_TOTAL') as Project_Objectives_IHHL_TOTAL,XPATH(x,'row/Project_Objectives_SCW') as Project_Objectives_SCW,XPATH(x,'row/Project_Objectives_School_Toilets') as Project_Objectives_School_Toilets,XPATH(x,'row/Project_Objectives_Anganwadi_Toilets') as Project_Objectives_Anganwadi_Toilets,XPATH(x,'row/Project_Objectives_RSM') as Project_Objectives_RSM,XPATH(x,'row/Project_Objectives_PC') as Project_Objectives_PC,XPATH(x,'row/Project_Performance-IHHL_BPL') as Project_Performance_IHHL_BPL,XPATH(x,'row/Project_Performance-IHHL_APL') as Project_Performance_IHHL_APL,XPATH(x,'row/Project_Performance-IHHL_TOTAL') as Project_Performance_IHHL_TOTAL,XPATH(x,'row/Project_Performance-SCW') as Project_Performance_SCW,XPATH(x,'row/Project_Performance-School_Toilets') as Project_Performance_School_Toilets,XPATH(x,'row/Project_Performance-Anganwadi_Toilets') as Project_Performance_Anganwadi_Toilets,
+XPATH(x,'row/Project_Performance-RSM') as Project_Performance_RSM,
+XPATH(x,'row/Project_Performance-PC') as Project_Performance_PC;
+
+-------------------------------------------------------------------------------------------------------------------------------------
+
+Step 3 : Analysis of the data to find out the districts who achieved 100 percent objective in BPL cards 
+Logic Assumption : If the difference between the project objective and project performance is negative or equal to 0, then the 100 percent objective is met.
+-------------------------------------------------------------------------------------------------------------------------------------
+6) bpl_objective_completion_data = foreach states_data_format generate State_Name,District_Name,Project_Objectives_IHHL_BPL,Project_Performance_IHHL_BPL, ((int)Project_Objectives_IHHL_BPL - (int)Project_Performance_IHHL_BPL) as completion;
+
+7) bpl_objective_completion_final_data = filter bpl_objective_completion_data by completion <= 0;
+
+8) bpl_objective_completion_districts =  foreach bpl_objective_completion_final_data generate State_Name,District_Name,completion;
+
+-------------------------------------------------------------------------------------------------------------------------------------
+
+Step 4 : Store and check the data in HDFS directory
+-------------------------------------------------------------------------------------------------------------------------------------
+9) store bpl_objective_completion_districts into '/tmp/bpl_objective_completion_districts_new'
+
+10) hdfs dfs -cat /tmp/bpl_objective_completion_districts/part-m-00000
+
+
+-------------------------------------------------------------------------------------------------------------------------------------
+Step 5 : Login to MySql and use the test database to create a table districts_new (This table will store the data)
+-------------------------------------------------------------------------------------------------------------------------------------
+11) mysql --user=root --password=root
+
+12) use test
+
+13) CREATE TABLE districts_new (  
+   state_name VARCHAR(100), 
+   district_name VARCHAR(100),
+   completion INT)
+
+-------------------------------------------------------------------------------------------------------------------------------------
+Step 6 : Using Sqoop, export the data from HDFS to MySQl table districts_new
+
+14) sqoop export --connect jdbc:mysql://localhost/test --username root --password root --table districts_new  --input-fields-terminated-by ','  --export-dir /tmp/bpl_objective_completion_districts_new;
+-------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+Query 2 : Problem Statement 2 
+
+***Run Pig in Local Mode to test in Local Mode***
+---------------------------------------------------
+pig -x local
+---------------------------------------------------
+
+------------------------------------------------------------------------------------------------------------------------------------
+** We will move the xml file from HDFS location (/user/flume/flume_import/StatewiseDistrictwisePhysicalProgress.xml) to the local
+system (/user/flume/flume_import/StatewiseDistrictwisePhysicalProgress.xml) using the below command :
+
+**************************** hdfs dfs -get /user/flume/flume_import/StatewiseDistrictwisePhysicalProgress.xml /user/flume/flume_import/StatewiseDistrictwisePhysicalProgress.xml *********************************************
+
+** We will now perform the Step 2 (Refer the Step 2 above in the document) to load and parse the XML Data
+------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------
+Step 7 : Analysis of the data to find out the districts who achieved 80 percent(or greater) objective in BPL cards 
+Logic Assumption : We will divide the performance by objective and then multiply by 100 to get the percentage completion.If the percentage completion is greater than(or equal) 80, then we will return a boolean value (true). We will filter the results based on this status value (true) to get the districts. We have a udf (IsDistrictCompleteTest()) written in java to perform this functionality.
+The jar file is attached.The jar file is built using the maven tool (using the command 'mvn clean install')
+
+------------------------------------------------------------------------------------------------------------------------------------  
+15) valid_districts = foreach states_data_format generate Project_Objectives_IHHL_BPL as objective,Project_Performance_IHHL_BPL as performance,State_Name,District_Name;
+
+16) Register '/my-folder/pigudf_filter/target/pig-udf_filter_test.jar';
+
+17) valid_districts_status = foreach valid_districts generate objective,performance,IsDistrictCompleteTest(*) as status,State_Name,District_Name
+
+18) filter_valid_districts = filter valid_districts_status by status == true;
+
+19) final_districts = foreach filter_valid_districts generate State_Name,District_Name,objective,performance; 
+
+-------------------------------------------------------------------------------------------------------------------------------------
+Step 8 : Create a folder in local and then store the results in that file. After that, move the file to HDFS for further processing
+
+-------------------------------------------------------------------------------------------------------------------------------------
+20) hdfs dfs -mkdir -p /tmp/final_districts/;
+
+21) store final_districts into '/tmp/final_districts/';
+
+22) hdfs dfs -put /tmp/final_districts/part-m-00000 /tmp/final_districts/
+
+-------------------------------------------------------------------------------------------------------------------------------------
+Step 9 : Login to mysql and type 'Use test' to use the test database. Create a table where the results will be stored
+
+23.) CREATE TABLE districts_final (  
+   state_name VARCHAR(100), 
+   district_name VARCHAR(100),
+   objective INT,
+   performance INT)
+
+-------------------------------------------------------------------------------------------------------------------------------------
+Step 10 : Using Sqoop, export the results to MySql table in the test database 
+
+24) sqoop export --connect jdbc:mysql://localhost/test --username root --password root --table districts_final  --input-fields-terminated-by ','  --export-dir /tmp/final_districts;
+-------------------------------------------------------------------------------------------------------------------------------------
